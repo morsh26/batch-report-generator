@@ -13,12 +13,15 @@ import os
 import sys
 import time
 import logging
+import tempfile
+import re
 from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
 import requests
 import google.generativeai as genai
+from PyPDF2 import PdfReader, PdfWriter
 
 # Load environment variables from .env file
 load_dotenv()
@@ -45,8 +48,29 @@ SECTIONS = [
     'liquidation_analysis'
 ]
 
+# Section groups for hybrid token strategy
+# Group A: Full context sections - need complete annual report for context
+FULL_CONTEXT_SECTIONS = {
+    'company_profile',
+    'executive_summary',
+    'business_environment',
+    'asset_portfolio_analysis'
+}
+
+# Group B: Focused financial sections - use sliced financial statements only
+FOCUSED_FINANCIAL_SECTIONS = {
+    'debt_structure',
+    'financial_analysis',
+    'cash_flow_and_liquidity',
+    'liquidation_analysis'
+}
+
 # Delay between API calls (seconds)
-API_DELAY = 2.0
+API_DELAY = 5.0  # Increased to avoid rate limits
+
+# Rate limit retry settings
+RATE_LIMIT_MAX_RETRIES = 5
+RATE_LIMIT_BASE_DELAY = 30  # Start with 30 seconds wait on rate limit
 
 # Configure logging
 logging.basicConfig(
@@ -201,6 +225,179 @@ def configure_gemini():
     logger.info("Gemini API configured successfully")
 
 
+# ============================================================
+# PDF SLICING FUNCTIONS FOR HYBRID TOKEN STRATEGY
+# ============================================================
+
+def get_financial_range(pdf_path: Path) -> tuple[int, int]:
+    """
+    Identify the start and end pages of Financial Statements & Notes in the PDF.
+
+    Searches for Hebrew/English markers that typically indicate:
+    - Start: "דוחות כספיים", "Financial Statements", "דוח על המצב הכספי"
+    - End: End of notes or start of appendices
+
+    Returns (start_page, end_page) as 0-indexed page numbers.
+    If not found, returns a reasonable default range (last 40% of document).
+    """
+    try:
+        reader = PdfReader(str(pdf_path))
+        total_pages = len(reader.pages)
+
+        # Markers for financial statements section (Hebrew and English)
+        start_markers = [
+            'דוחות כספיים',
+            'דוח על המצב הכספי',
+            'מאזן',
+            'דוח רווח והפסד',
+            'financial statements',
+            'balance sheet',
+            'statement of financial position',
+            'consolidated statements'
+        ]
+
+        # Markers that indicate end of financial section
+        end_markers = [
+            'נספחים',
+            'appendix',
+            'פרטים נוספים',
+            'דוח דירקטוריון',  # Usually comes after financials
+            'פרק ה',  # Chapter markers
+            'additional information'
+        ]
+
+        start_page = None
+        end_page = total_pages - 1  # Default to last page
+
+        logger.info(f"Scanning {pdf_path.name} ({total_pages} pages) for financial statements...")
+
+        for i, page in enumerate(reader.pages):
+            try:
+                text = page.extract_text() or ""
+                text_lower = text.lower()
+
+                # Look for start markers
+                if start_page is None:
+                    for marker in start_markers:
+                        if marker.lower() in text_lower:
+                            start_page = i
+                            logger.info(f"  Found financial section start at page {i + 1} (marker: '{marker}')")
+                            break
+
+                # Look for end markers (only after finding start)
+                if start_page is not None and i > start_page + 10:  # At least 10 pages of financials
+                    for marker in end_markers:
+                        if marker.lower() in text_lower:
+                            end_page = i - 1  # Page before the end marker
+                            logger.info(f"  Found financial section end at page {end_page + 1} (marker: '{marker}')")
+                            break
+                    if end_page < total_pages - 1:
+                        break  # Found end, stop scanning
+
+            except Exception as e:
+                logger.debug(f"  Could not extract text from page {i + 1}: {e}")
+                continue
+
+        # Fallback: if no markers found, use last 40% of document
+        # (Financial statements are typically in the latter part of annual reports)
+        if start_page is None:
+            start_page = int(total_pages * 0.5)  # Start from 50%
+            end_page = total_pages - 1
+            logger.warning(f"  No financial markers found, using fallback range: pages {start_page + 1}-{end_page + 1}")
+
+        # Ensure reasonable bounds
+        start_page = max(0, start_page)
+        end_page = min(total_pages - 1, end_page)
+
+        # Ensure at least 20 pages (financial statements need context)
+        if end_page - start_page < 20:
+            end_page = min(start_page + 50, total_pages - 1)
+
+        logger.info(f"  Financial range: pages {start_page + 1} to {end_page + 1} ({end_page - start_page + 1} pages)")
+        return start_page, end_page
+
+    except Exception as e:
+        logger.error(f"Error analyzing PDF {pdf_path.name}: {e}")
+        # Return last 40% as safe fallback
+        try:
+            reader = PdfReader(str(pdf_path))
+            total_pages = len(reader.pages)
+            return int(total_pages * 0.5), total_pages - 1
+        except:
+            return 0, 100  # Absolute fallback
+
+
+def slice_pdf_pages(pdf_path: Path, start_page: int, end_page: int, output_dir: Path) -> Optional[Path]:
+    """
+    Create a new PDF containing only the specified page range.
+
+    Args:
+        pdf_path: Path to the source PDF
+        start_page: Start page (0-indexed)
+        end_page: End page (0-indexed, inclusive)
+        output_dir: Directory to save the sliced PDF
+
+    Returns:
+        Path to the sliced PDF, or None if slicing fails
+    """
+    try:
+        reader = PdfReader(str(pdf_path))
+        writer = PdfWriter()
+
+        total_pages = len(reader.pages)
+
+        # Validate page range
+        start_page = max(0, start_page)
+        end_page = min(total_pages - 1, end_page)
+
+        if start_page > end_page:
+            logger.error(f"Invalid page range: {start_page} to {end_page}")
+            return None
+
+        # Extract pages
+        for i in range(start_page, end_page + 1):
+            writer.add_page(reader.pages[i])
+
+        # Create output filename
+        output_filename = f"sliced_financials_{pdf_path.stem}.pdf"
+        output_path = output_dir / output_filename
+
+        # Write sliced PDF
+        with open(output_path, 'wb') as f:
+            writer.write(f)
+
+        pages_extracted = end_page - start_page + 1
+        logger.info(f"Created sliced PDF: {output_path.name} ({pages_extracted} pages from {total_pages} total)")
+
+        return output_path
+
+    except Exception as e:
+        logger.error(f"Error slicing PDF {pdf_path.name}: {e}")
+        return None
+
+
+def create_sliced_annual_pdf(annual_pdf: Path, company_dir: Path) -> Optional[Path]:
+    """
+    Create a sliced version of the annual PDF containing only financial statements.
+
+    Args:
+        annual_pdf: Path to the full annual report PDF
+        company_dir: Company directory (used for temp storage)
+
+    Returns:
+        Path to the sliced PDF, or None if creation fails
+    """
+    logger.info(f"Creating sliced financial PDF from {annual_pdf.name}...")
+
+    # Get the page range for financial statements
+    start_page, end_page = get_financial_range(annual_pdf)
+
+    # Create the sliced PDF in the company directory
+    sliced_path = slice_pdf_pages(annual_pdf, start_page, end_page, company_dir)
+
+    return sliced_path
+
+
 def find_pdf_files(company_dir: Path) -> tuple[Optional[Path], Optional[Path]]:
     """
     Find Annual and Quarterly PDF files in a company directory.
@@ -279,19 +476,30 @@ def is_token_limit_error(response: requests.Response) -> bool:
     return any(keyword in error_text for keyword in token_limit_keywords)
 
 
+def is_rate_limit_error(response: requests.Response) -> bool:
+    """Check if the error is a rate limit (429) error."""
+    if response.status_code == 429:
+        return True
+
+    error_text = response.text.lower()
+    rate_limit_keywords = ['too many requests', 'rate limit', 'quota', '429']
+    return any(keyword in error_text for keyword in rate_limit_keywords)
+
+
 def call_section_api(
     section_id: str,
     file_uri1: str,
     file_uri2: Optional[str],
     company_name: str,
-    display_name: str,
-    max_retries: int = 2
+    display_name: str
 ) -> tuple[Optional[str], bool]:
     """
     Make API call to generate a section.
     Returns (html_content, is_token_error).
     html_content is None if failed, string if successful.
     is_token_error indicates if failure was due to token limits.
+
+    Handles rate limits (429) with exponential backoff.
     """
     payload = {
         "action": "generate_section",
@@ -307,7 +515,11 @@ def call_section_api(
         "Authorization": f"Bearer {SUPABASE_ANON_KEY}"
     }
 
-    for attempt in range(max_retries):
+    rate_limit_retries = 0
+    general_retries = 0
+    max_general_retries = 3
+
+    while True:
         try:
             response = requests.post(
                 SUPABASE_FUNCTION_URL,
@@ -324,50 +536,71 @@ def call_section_api(
                 else:
                     return None, False
 
+            # Check for rate limit error (429) - use exponential backoff
+            if is_rate_limit_error(response):
+                rate_limit_retries += 1
+                if rate_limit_retries <= RATE_LIMIT_MAX_RETRIES:
+                    wait_time = RATE_LIMIT_BASE_DELAY * (2 ** (rate_limit_retries - 1))  # 30, 60, 120, 240, 480 seconds
+                    logger.warning(f"⏳ Rate limit hit for {display_name}. Waiting {wait_time}s before retry {rate_limit_retries}/{RATE_LIMIT_MAX_RETRIES}...")
+                    time.sleep(wait_time)
+                    continue  # Retry without incrementing general_retries
+                else:
+                    logger.error(f"Rate limit exceeded max retries for {display_name}")
+                    return None, False
+
             # Check for token limit error
             if is_token_limit_error(response):
                 return None, True
 
-            # Other 500 errors - retry
-            if response.status_code == 500 and attempt < max_retries - 1:
-                logger.warning(f"Attempt {attempt + 1} failed for {display_name} (500 error), retrying in 5s...")
-                time.sleep(5)
-                continue
+            # Other 500 errors - retry with general counter
+            if response.status_code == 500:
+                general_retries += 1
+                if general_retries < max_general_retries:
+                    logger.warning(f"Attempt {general_retries} failed for {display_name} (500 error), retrying in 10s...")
+                    time.sleep(10)
+                    continue
+                else:
+                    logger.error(f"API error for {display_name}: {response.status_code} - {response.text[:200]}")
+                    return None, False
 
-            # Other errors
+            # Other errors - don't retry
             logger.error(f"API error for {display_name}: {response.status_code} - {response.text[:200]}")
             return None, False
 
         except requests.exceptions.Timeout:
-            if attempt < max_retries - 1:
-                logger.warning(f"Timeout on attempt {attempt + 1} for {display_name}, retrying...")
-                time.sleep(5)
+            general_retries += 1
+            if general_retries < max_general_retries:
+                logger.warning(f"Timeout on attempt {general_retries} for {display_name}, retrying in 10s...")
+                time.sleep(10)
                 continue
+            logger.error(f"Timeout for {display_name} after {general_retries} attempts")
             return None, False
         except Exception as e:
             logger.error(f"Exception generating {display_name}: {e}")
             return None, False
 
-    return None, False
 
-
-def generate_section(
+def generate_section_with_fallback(
     section_id: str,
-    file_uri1: str,
-    file_uri2: Optional[str],
+    primary_uri: str,
+    secondary_uri: Optional[str],
+    fallback_uri: str,
     company_name: str
 ) -> str:
     """
-    Call Supabase Edge Function to generate a report section.
-    Implements smart fallback logic for token limit errors:
+    Generate a report section with smart fallback for token limit errors.
 
-    Phase 1: Try with BOTH files (annual + quarterly)
-    Phase 2: If token limit error, retry with SINGLE file:
-        - Descriptive sections (company_profile, business_environment, asset_portfolio_analysis)
-          → Use Annual Report only
-        - Financial sections (all others)
-          → Use Quarterly Report only (or Annual if no quarterly)
-    Phase 3: If still fails, return error HTML (don't crash)
+    Strategy:
+    - Phase 1: Try with [primary_uri, secondary_uri]
+    - Phase 2: If token limit error, retry with [fallback_uri] only
+    - Phase 3: If still fails, return error HTML (don't crash)
+
+    Args:
+        section_id: The section identifier
+        primary_uri: Main file URI (full annual or sliced annual)
+        secondary_uri: Secondary file URI (quarterly, can be None)
+        fallback_uri: Fallback file URI if token limit hit
+        company_name: Company name for the report
 
     Returns HTML snippet or error HTML.
     """
@@ -382,145 +615,193 @@ def generate_section(
         'liquidation_analysis': 'ניתוח פירוק'
     }
 
-    # Sections that need historical context (use Annual for fallback)
-    descriptive_sections = {'company_profile', 'business_environment', 'asset_portfolio_analysis'}
-
-    # Sections that need fresh numbers (use Quarterly for fallback)
-    financial_sections = {'executive_summary', 'financial_analysis', 'liquidation_analysis',
-                          'cash_flow_and_liquidity', 'debt_structure'}
-
     display_name = section_display_names.get(section_id, section_id)
-    logger.info(f"Generating section: {display_name} ({section_id})...")
+    logger.info(f"  Generating: {display_name} ({section_id})...")
 
     # ============================================================
-    # PHASE 1: Try with BOTH files
+    # PHASE 1: Try with primary + secondary files
     # ============================================================
-    logger.info(f"  Phase 1: Attempting with both files...")
+    files_desc = "primary + secondary" if secondary_uri else "primary only"
+    logger.info(f"    Phase 1: Attempting with {files_desc}...")
+
     html_content, is_token_error = call_section_api(
-        section_id, file_uri1, file_uri2, company_name, display_name
+        section_id, primary_uri, secondary_uri, company_name, display_name
     )
 
     if html_content:
-        logger.info(f"Successfully generated {display_name}")
+        logger.info(f"    ✓ Successfully generated {display_name}")
         return f'<div class="section" id="{section_id}">\n{html_content}\n</div>'
 
     # ============================================================
     # PHASE 2: Fallback to single file if token limit error
     # ============================================================
     if is_token_error:
-        logger.warning(f"⚠️  Token Limit Hit for {display_name} - Retrying with single file...")
-
-        if section_id in descriptive_sections:
-            # Use Annual Report only (deeper historical context)
-            logger.info(f"  Phase 2: Using ANNUAL report only for {display_name}...")
-            fallback_uri1 = file_uri1  # Annual
-            fallback_uri2 = None
-        elif section_id in financial_sections:
-            # Use Quarterly Report only (fresher numbers)
-            # If no quarterly, fall back to annual
-            if file_uri2:
-                logger.info(f"  Phase 2: Using QUARTERLY report only for {display_name}...")
-                fallback_uri1 = file_uri2  # Quarterly
-                fallback_uri2 = None
-            else:
-                logger.info(f"  Phase 2: No quarterly available, using ANNUAL report for {display_name}...")
-                fallback_uri1 = file_uri1
-                fallback_uri2 = None
-        else:
-            # Unknown section - default to annual
-            logger.info(f"  Phase 2: Using ANNUAL report only for {display_name}...")
-            fallback_uri1 = file_uri1
-            fallback_uri2 = None
+        logger.warning(f"    ⚠️ Token Limit Hit - Retrying with fallback file only...")
 
         html_content, is_token_error_2 = call_section_api(
-            section_id, fallback_uri1, fallback_uri2, company_name, display_name
+            section_id, fallback_uri, None, company_name, display_name
         )
 
         if html_content:
-            logger.info(f"Successfully generated {display_name} (single file fallback)")
+            logger.info(f"    ✓ Successfully generated {display_name} (fallback)")
             return f'<div class="section" id="{section_id}">\n{html_content}\n</div>'
 
         # ============================================================
         # PHASE 3: Final failure
         # ============================================================
         if is_token_error_2:
-            logger.error(f"❌ {display_name} failed even with single file (token limit still exceeded)")
+            logger.error(f"    ❌ {display_name} failed - token limit exceeded even with single file")
             return f'<div class="error">שגיאה: {display_name} - הקובץ גדול מדי גם עם קובץ בודד</div>'
         else:
-            logger.error(f"❌ {display_name} failed on single file fallback")
+            logger.error(f"    ❌ {display_name} failed on fallback")
             return f'<div class="error">שגיאה בייצור {display_name} (fallback נכשל)</div>'
 
     # Non-token-limit error in phase 1
-    logger.error(f"❌ {display_name} failed (not a token limit error)")
+    logger.error(f"    ❌ {display_name} failed (not a token limit error)")
     return f'<div class="error">שגיאה בייצור {display_name}</div>'
 
 
 def process_company(company_dir: Path) -> tuple[bool, list[str]]:
     """
-    Process a single company: upload files, generate sections, save report.
+    Process a single company using HYBRID TOKEN STRATEGY:
+
+    1. Pre-process: Create sliced PDF with only financial statements
+    2. Upload: Full annual, sliced annual, and quarterly PDFs
+    3. Generate sections:
+       - Group A (Full Context): Use [full_annual, quarterly] with fallback
+       - Group B (Focused Financial): Use [sliced_annual, quarterly] always
+
     Returns (success, failed_sections) - success is True only if ALL sections generated successfully.
     """
     company_name = company_dir.name
     failed_sections = []
+    sliced_pdf_path = None  # Track for cleanup
 
     logger.info(f"\n{'='*60}")
     logger.info(f"Processing company: {company_name}")
     logger.info(f"{'='*60}")
 
-    # Find PDF files
-    annual_pdf, quarterly_pdf = find_pdf_files(company_dir)
+    try:
+        # ============================================================
+        # STEP 1: Find PDF files
+        # ============================================================
+        annual_pdf, quarterly_pdf = find_pdf_files(company_dir)
 
-    if annual_pdf is None:
-        logger.error(f"No PDF files found for {company_name}")
-        return False, ["NO_FILES"]
+        if annual_pdf is None:
+            logger.error(f"No PDF files found for {company_name}")
+            return False, ["NO_FILES"]
 
-    logger.info(f"Found PDFs - Annual: {annual_pdf.name if annual_pdf else 'None'}, "
-                f"Quarterly: {quarterly_pdf.name if quarterly_pdf else 'None'}")
+        logger.info(f"Found PDFs - Annual: {annual_pdf.name if annual_pdf else 'None'}, "
+                    f"Quarterly: {quarterly_pdf.name if quarterly_pdf else 'None'}")
 
-    # Upload PDFs to Gemini
-    file_uri1 = upload_pdf_to_gemini(annual_pdf)
-    if file_uri1 is None:
-        logger.error(f"Failed to upload annual report for {company_name}")
-        return False, ["UPLOAD_FAILED"]
+        # ============================================================
+        # STEP 2: PRE-PROCESS - Create sliced financial PDF
+        # ============================================================
+        logger.info("Step 2: Creating sliced financial PDF...")
+        sliced_pdf_path = create_sliced_annual_pdf(annual_pdf, company_dir)
 
-    file_uri2 = None
-    if quarterly_pdf:
-        file_uri2 = upload_pdf_to_gemini(quarterly_pdf)
-        if file_uri2 is None:
-            logger.warning(f"Failed to upload quarterly report for {company_name}, continuing with annual only")
+        if sliced_pdf_path is None:
+            logger.warning("Could not create sliced PDF, will use full annual for all sections")
 
-    # Generate all sections
-    html_sections = []
-    for section_id in SECTIONS:
-        section_html = generate_section(section_id, file_uri1, file_uri2, company_name)
-        html_sections.append(section_html)
+        # ============================================================
+        # STEP 3: Upload all PDFs to Gemini
+        # ============================================================
+        logger.info("Step 3: Uploading PDFs to Gemini...")
 
-        # Track failed sections (check if error div was returned)
-        if 'class="error"' in section_html:
-            failed_sections.append(section_id)
+        # Upload full annual PDF
+        full_annual_uri = upload_pdf_to_gemini(annual_pdf)
+        if full_annual_uri is None:
+            logger.error(f"Failed to upload annual report for {company_name}")
+            return False, ["UPLOAD_FAILED"]
 
-        time.sleep(API_DELAY)  # Rate limiting delay
+        # Upload sliced annual PDF (if created)
+        sliced_annual_uri = None
+        if sliced_pdf_path:
+            sliced_annual_uri = upload_pdf_to_gemini(sliced_pdf_path)
+            if sliced_annual_uri is None:
+                logger.warning("Failed to upload sliced PDF, will use full annual for financial sections")
 
-    # Assemble final HTML
-    final_html = get_html_template(company_name)
-    final_html += "\n".join(html_sections)
-    final_html += get_html_footer()
+        # Upload quarterly PDF (if exists)
+        quarterly_uri = None
+        if quarterly_pdf:
+            quarterly_uri = upload_pdf_to_gemini(quarterly_pdf)
+            if quarterly_uri is None:
+                logger.warning(f"Failed to upload quarterly report for {company_name}, continuing without it")
 
-    # Save report
-    output_company_dir = OUTPUT_DIR / company_name
-    output_company_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_company_dir / "final_report.html"
+        # ============================================================
+        # STEP 4: Generate sections using HYBRID STRATEGY
+        # ============================================================
+        logger.info("Step 4: Generating sections with hybrid token strategy...")
+        html_sections = []
 
-    with open(output_file, 'w', encoding='utf-8') as f:
-        f.write(final_html)
+        for section_id in SECTIONS:
+            # Determine which files to use based on section group
+            if section_id in FULL_CONTEXT_SECTIONS:
+                # GROUP A: Full Context Sections
+                # Strategy: Try [full_annual, quarterly], fallback to [full_annual] only
+                logger.info(f"[Group A - Full Context] {section_id}")
+                section_html = generate_section_with_fallback(
+                    section_id=section_id,
+                    primary_uri=full_annual_uri,
+                    secondary_uri=quarterly_uri,
+                    fallback_uri=full_annual_uri,  # Fallback: annual only
+                    company_name=company_name
+                )
+            else:
+                # GROUP B: Focused Financial Sections
+                # Strategy: ALWAYS use [sliced_annual, quarterly] to save tokens
+                logger.info(f"[Group B - Focused Financial] {section_id}")
 
-    logger.info(f"Report saved to: {output_file}")
+                # Use sliced if available, otherwise full annual
+                financial_uri = sliced_annual_uri if sliced_annual_uri else full_annual_uri
 
-    if failed_sections:
-        logger.warning(f"⚠️  {company_name}: {len(failed_sections)} section(s) FAILED: {', '.join(failed_sections)}")
-        return False, failed_sections
+                section_html = generate_section_with_fallback(
+                    section_id=section_id,
+                    primary_uri=financial_uri,
+                    secondary_uri=quarterly_uri,
+                    fallback_uri=financial_uri,  # Fallback: sliced/annual only
+                    company_name=company_name
+                )
 
-    return True, []
+            html_sections.append(section_html)
+
+            # Track failed sections
+            if 'class="error"' in section_html:
+                failed_sections.append(section_id)
+
+            time.sleep(API_DELAY)  # Rate limiting delay
+
+        # ============================================================
+        # STEP 5: Assemble and save final HTML
+        # ============================================================
+        final_html = get_html_template(company_name)
+        final_html += "\n".join(html_sections)
+        final_html += get_html_footer()
+
+        # Save report
+        output_company_dir = OUTPUT_DIR / company_name
+        output_company_dir.mkdir(parents=True, exist_ok=True)
+        output_file = output_company_dir / "final_report.html"
+
+        with open(output_file, 'w', encoding='utf-8') as f:
+            f.write(final_html)
+
+        logger.info(f"Report saved to: {output_file}")
+
+        if failed_sections:
+            logger.warning(f"⚠️  {company_name}: {len(failed_sections)} section(s) FAILED: {', '.join(failed_sections)}")
+            return False, failed_sections
+
+        return True, []
+
+    finally:
+        # Cleanup: Remove temporary sliced PDF
+        if sliced_pdf_path and sliced_pdf_path.exists():
+            try:
+                sliced_pdf_path.unlink()
+                logger.debug(f"Cleaned up temporary file: {sliced_pdf_path}")
+            except Exception as e:
+                logger.warning(f"Could not delete temporary file {sliced_pdf_path}: {e}")
 
 
 def main():
