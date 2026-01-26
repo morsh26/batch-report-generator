@@ -14,8 +14,8 @@ Usage:
     uvicorn server:app --reload --port 8000
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
 from typing import Optional
 import logging
@@ -37,6 +37,8 @@ from core import (
     create_report_slices,
     # Report Builder
     assemble_report,
+    # PDF Converter
+    html_to_pdf,
 )
 
 # Configure logging
@@ -128,11 +130,12 @@ async def list_sections():
     }
 
 
-@app.post("/api/v1/reports/generate", response_model=GenerateReportResponse)
+@app.post("/api/v1/reports/generate")
 async def generate_report(
     company_name: str,
     annual_pdf: UploadFile = File(...),
-    quarterly_pdf: Optional[UploadFile] = File(None)
+    quarterly_pdf: Optional[UploadFile] = File(None),
+    format: str = Query(default="html", regex="^(html|pdf)$")
 ):
     """
     Generate a complete financial report from uploaded PDF files.
@@ -140,15 +143,16 @@ async def generate_report(
     This endpoint demonstrates how to use the core modules in a web context:
     1. Accept PDF uploads (bytes)
     2. Call stateless core functions
-    3. Return generated HTML
+    3. Return generated HTML or PDF
 
     Args:
         company_name: Name of the company
         annual_pdf: Annual report PDF file
         quarterly_pdf: Optional quarterly report PDF file
+        format: Output format - "html" (default) or "pdf"
 
     Returns:
-        GenerateReportResponse with HTML content or error
+        GenerateReportResponse with HTML content, or PDF bytes
     """
     if _model is None:
         raise HTTPException(status_code=503, detail="Service not initialized")
@@ -234,6 +238,23 @@ async def generate_report(
 
         # Assemble final report
         final_html = assemble_report(company_name, html_sections)
+
+        # Return PDF if requested
+        if format == "pdf":
+            pdf_bytes = html_to_pdf(final_html)
+            if pdf_bytes:
+                return Response(
+                    content=pdf_bytes,
+                    media_type="application/pdf",
+                    headers={
+                        "Content-Disposition": f"attachment; filename={company_name}_report.pdf"
+                    }
+                )
+            else:
+                return GenerateReportResponse(
+                    success=False,
+                    error="PDF conversion failed"
+                )
 
         return GenerateReportResponse(
             success=len(failed_sections) == 0,

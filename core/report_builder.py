@@ -8,6 +8,11 @@ This module is stateless - returns strings without file I/O.
 import time
 from typing import List
 
+HEBREW_MONTHS = [
+    'ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני',
+    'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר'
+]
+
 
 def get_html_template(company_name: str, timestamp: str = None) -> str:
     """
@@ -21,7 +26,9 @@ def get_html_template(company_name: str, timestamp: str = None) -> str:
         HTML header string
     """
     if timestamp is None:
-        timestamp = time.strftime('%d/%m/%Y %H:%M')
+        month_idx = int(time.strftime('%m')) - 1
+        year = time.strftime('%Y')
+        timestamp = f"{HEBREW_MONTHS[month_idx]} {year}"
 
     return f"""<!DOCTYPE html>
 <html dir="rtl" lang="he">
@@ -42,9 +49,7 @@ def get_html_template(company_name: str, timestamp: str = None) -> str:
             text-align: right;
             line-height: 1.8;
             color: #333;
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 40px 20px;
+            margin: 0;
             background-color: #f5f5f5;
         }}
 
@@ -137,13 +142,54 @@ def get_html_template(company_name: str, timestamp: str = None) -> str:
             font-size: 12px;
             margin-bottom: 30px;
         }}
+
+        /* Print/PDF styles */
+        @page {{
+            size: A4;
+            margin: 15mm;
+        }}
+
+        @media print {{
+            body {{
+                background-color: white;
+                margin: 0;
+                padding: 0;
+            }}
+
+            .report-container {{
+                box-shadow: none;
+                padding: 0;
+                border-radius: 0;
+            }}
+
+            table {{
+                page-break-inside: auto;
+            }}
+
+            tr {{
+                page-break-inside: avoid;
+                page-break-after: auto;
+            }}
+
+            thead {{
+                display: table-header-group;
+            }}
+
+            .section {{
+                page-break-inside: avoid;
+            }}
+
+            h2, h3 {{
+                page-break-after: avoid;
+            }}
+        }}
     </style>
 </head>
 <body>
     <div class="report-container">
-        <h1>דוח פיננסי מקיף - {company_name}</h1>
+        <h1>דוח אנליזה - {company_name}</h1>
         <div class="meta-info">
-            נוצר באופן אוטומטי | תאריך יצירה: {timestamp}
+{timestamp}
         </div>
 """
 

@@ -10,6 +10,7 @@ Modules:
 - pdf_processor: PyMuPDF slicing and text extraction
 - prompts: AI prompts for the 8 sections
 - report_builder: HTML report assembly
+- pdf_converter: HTML to PDF conversion
 """
 
 from .config import (
@@ -57,6 +58,10 @@ from .report_builder import (
     create_error_section,
 )
 
+from .pdf_converter import (
+    html_to_pdf,
+)
+
 __all__ = [
     # Config
     'GOOGLE_API_KEY',
@@ -95,4 +100,6 @@ __all__ = [
     'get_html_footer',
     'assemble_report',
     'create_error_section',
+    # PDF Converter
+    'html_to_pdf',
 ]

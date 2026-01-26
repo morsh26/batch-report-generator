@@ -44,6 +44,8 @@ from core import (
     create_report_slices,
     # Report Builder
     assemble_report,
+    # PDF Converter
+    html_to_pdf,
 )
 
 # Configure logging
@@ -126,6 +128,27 @@ def save_html_report(html_content: str, output_path: Path) -> bool:
         return True
     except Exception as e:
         logger.error(f"Error saving report to {output_path}: {e}")
+        return False
+
+
+def save_pdf_report(pdf_bytes: bytes, output_path: Path) -> bool:
+    """
+    Save PDF report to disk.
+
+    Args:
+        pdf_bytes: The PDF content as bytes
+        output_path: Path where to save the file
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'wb') as f:
+            f.write(pdf_bytes)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving PDF to {output_path}: {e}")
         return False
 
 
@@ -288,13 +311,25 @@ def process_company(company_dir: Path, model) -> tuple[bool, list[str]]:
         final_html = assemble_report(company_name, html_sections)
 
         output_company_dir = DEFAULT_OUTPUT_DIR / company_name
-        output_file = output_company_dir / "final_report.html"
+        html_output_file = output_company_dir / "final_report.html"
+        pdf_output_file = output_company_dir / "final_report.pdf"
 
-        if save_html_report(final_html, output_file):
-            logger.info(f"Report saved to: {output_file}")
+        if save_html_report(final_html, html_output_file):
+            logger.info(f"HTML report saved to: {html_output_file}")
         else:
-            logger.error(f"Failed to save report for {company_name}")
+            logger.error(f"Failed to save HTML report for {company_name}")
             return False, ["SAVE_ERROR"]
+
+        # Step 6: Convert to PDF
+        logger.info("Step 6: Converting to PDF...")
+        pdf_bytes = html_to_pdf(final_html)
+        if pdf_bytes:
+            if save_pdf_report(pdf_bytes, pdf_output_file):
+                logger.info(f"PDF report saved to: {pdf_output_file}")
+            else:
+                logger.warning(f"Failed to save PDF for {company_name}")
+        else:
+            logger.warning(f"PDF conversion failed for {company_name}")
 
         if failed_sections:
             logger.warning(

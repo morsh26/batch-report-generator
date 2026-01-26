@@ -4,6 +4,7 @@ google-generativeai>=0.8.0
 google-api-core>=2.0.0
 PyMuPDF>=1.24.0
 requests>=2.31.0
+weasyprint>=60.0
 
 # Server Dependencies (optional - for server.py)
 fastapi>=0.104.0
