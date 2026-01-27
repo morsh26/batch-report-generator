@@ -25,6 +25,9 @@ def get_html_template(company_name: str, timestamp: str = None) -> str:
     Returns:
         HTML header string
     """
+    # Replace underscores with spaces for display
+    display_name = company_name.replace('_', ' ')
+
     if timestamp is None:
         month_idx = int(time.strftime('%m')) - 1
         year = time.strftime('%Y')
@@ -35,7 +38,7 @@ def get_html_template(company_name: str, timestamp: str = None) -> str:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>דוח פיננסי - {company_name}</title>
+    <title>דוח פיננסי - {display_name}</title>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;700&display=swap');
 
@@ -235,7 +238,7 @@ def get_html_template(company_name: str, timestamp: str = None) -> str:
 <body>
     <div class="report-container">
         <div class="cover-page">
-            <h1>דוח אנליזה - {company_name}</h1>
+            <h1>דוח אנליזה - {display_name}</h1>
             <div class="meta-info">{timestamp}</div>
         </div>
 """
