@@ -20,12 +20,16 @@ from pydantic import BaseModel
 from typing import Optional
 import logging
 
+import tempfile
+from pathlib import Path
+
 # Import all core functionality (stateless, no file I/O)
 from core import (
     # Config
     SECTIONS,
     SECTION_DISPLAY_NAMES,
     MODEL_NAME,
+    GOOGLE_API_KEY,
     validate_config,
     # AI Engine
     configure_gemini,
@@ -39,6 +43,9 @@ from core import (
     assemble_report,
     # PDF Converter
     html_to_pdf,
+    # Holding Chart Extractor
+    extract_holding_chart_page,
+    create_holding_chart_html,
 )
 
 # Configure logging
@@ -208,6 +215,21 @@ async def generate_report(
         if quarterly_bytes:
             quarterly_uri = upload_pdf_to_gemini(quarterly_bytes, quarterly_pdf.filename)
 
+        # Extract holding chart using temp directory
+        holding_chart_path = None
+        if GOOGLE_API_KEY:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                holding_chart_path = extract_holding_chart_page(
+                    pdf_bytes=annual_bytes,
+                    output_dir=Path(temp_dir),
+                    google_api_key=GOOGLE_API_KEY,
+                    company_name=company_name
+                )
+                # Create HTML immediately while temp file exists
+                holding_chart_html = create_holding_chart_html(holding_chart_path, company_name)
+        else:
+            holding_chart_html = create_holding_chart_html(None, company_name)
+
         # Generate all sections
         html_sections = []
         failed_sections = []
@@ -232,6 +254,10 @@ async def generate_report(
             )
 
             html_sections.append(section_html)
+
+            # Insert holding chart after company_profile section
+            if section_id == 'company_profile':
+                html_sections.append(holding_chart_html)
 
             if 'class="error"' in section_html:
                 failed_sections.append(section_id)

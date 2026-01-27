@@ -11,6 +11,7 @@ Modules:
 - prompts: AI prompts for the 8 sections
 - report_builder: HTML report assembly
 - pdf_converter: HTML to PDF conversion
+- holding_chart_extractor: Extract ownership structure charts from PDFs
 """
 
 from .config import (
@@ -62,6 +63,11 @@ from .pdf_converter import (
     html_to_pdf,
 )
 
+from .holding_chart_extractor import (
+    extract_holding_chart_page,
+    create_holding_chart_html,
+)
+
 __all__ = [
     # Config
     'GOOGLE_API_KEY',
@@ -102,4 +108,7 @@ __all__ = [
     'create_error_section',
     # PDF Converter
     'html_to_pdf',
+    # Holding Chart Extractor
+    'extract_holding_chart_page',
+    'create_holding_chart_html',
 ]

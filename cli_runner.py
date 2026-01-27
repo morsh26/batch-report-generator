@@ -33,6 +33,7 @@ from core import (
     DEFAULT_OUTPUT_DIR,
     MODEL_NAME,
     HEAVY_REPORT_THRESHOLD,
+    GOOGLE_API_KEY,
     validate_config,
     # AI Engine
     configure_gemini,
@@ -46,6 +47,9 @@ from core import (
     assemble_report,
     # PDF Converter
     html_to_pdf,
+    # Holding Chart Extractor
+    extract_holding_chart_page,
+    create_holding_chart_html,
 )
 
 # Configure logging
@@ -269,8 +273,27 @@ def process_company(company_dir: Path, model) -> tuple[bool, list[str]]:
         if quarterly_bytes:
             quarterly_uri = upload_pdf_to_gemini(quarterly_bytes, quarterly_pdf.name)
 
-        # Step 4: Generate sections
-        logger.info("Step 4: Generating sections...")
+        # Step 4: Extract holding chart (ownership structure diagram)
+        logger.info("Step 4: Extracting holding chart...")
+        output_company_dir = DEFAULT_OUTPUT_DIR / company_name
+        holding_chart_path = None
+
+        if GOOGLE_API_KEY:
+            holding_chart_path = extract_holding_chart_page(
+                pdf_bytes=annual_bytes,
+                output_dir=output_company_dir,
+                google_api_key=GOOGLE_API_KEY,
+                company_name=company_name
+            )
+            if holding_chart_path:
+                logger.info(f"Holding chart extracted: {holding_chart_path}")
+            else:
+                logger.info("No holding chart found in the report")
+        else:
+            logger.warning("GOOGLE_API_KEY not set - skipping holding chart extraction")
+
+        # Step 5: Generate sections
+        logger.info("Step 5: Generating sections...")
         html_sections = []
 
         for section_id in SECTIONS:
@@ -302,15 +325,19 @@ def process_company(company_dir: Path, model) -> tuple[bool, list[str]]:
 
             html_sections.append(section_html)
 
+            # Insert holding chart after company_profile section
+            if section_id == 'company_profile':
+                holding_chart_html = create_holding_chart_html(holding_chart_path, company_name)
+                html_sections.append(holding_chart_html)
+
             if 'class="error"' in section_html:
                 failed_sections.append(section_id)
 
             time.sleep(API_DELAY)
 
-        # Step 5: Assemble and save HTML
+        # Step 6: Assemble and save HTML
         final_html = assemble_report(company_name, html_sections)
 
-        output_company_dir = DEFAULT_OUTPUT_DIR / company_name
         html_output_file = output_company_dir / "final_report.html"
         pdf_output_file = output_company_dir / "final_report.pdf"
 
@@ -320,8 +347,8 @@ def process_company(company_dir: Path, model) -> tuple[bool, list[str]]:
             logger.error(f"Failed to save HTML report for {company_name}")
             return False, ["SAVE_ERROR"]
 
-        # Step 6: Convert to PDF
-        logger.info("Step 6: Converting to PDF...")
+        # Step 7: Convert to PDF
+        logger.info("Step 7: Converting to PDF...")
         pdf_bytes = html_to_pdf(final_html)
         if pdf_bytes:
             if save_pdf_report(pdf_bytes, pdf_output_file):

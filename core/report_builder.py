@@ -108,10 +108,26 @@ def get_html_template(company_name: str, timestamp: str = None) -> str:
 
         .section {{
             margin-bottom: 40px;
-            padding: 20px;
-            background: #fafafa;
-            border-radius: 6px;
-            border-right: 4px solid #2c5282;
+            padding: 20px 0;
+            background: white;
+        }}
+
+        /* Cover page styles */
+        .cover-page {{
+            text-align: center;
+            padding-top: 40vh;
+            padding-bottom: 40vh;
+            page-break-after: always;
+        }}
+
+        .cover-page h1 {{
+            font-size: 28px;
+            border-bottom: none;
+            margin-bottom: 20px;
+        }}
+
+        .cover-page .meta-info {{
+            font-size: 16px;
         }}
 
         .error {{
@@ -141,6 +157,31 @@ def get_html_template(company_name: str, timestamp: str = None) -> str:
             color: #718096;
             font-size: 12px;
             margin-bottom: 30px;
+        }}
+
+        .info {{
+            color: #718096;
+            font-style: italic;
+        }}
+
+        /* Holding Chart styles */
+        .holding-chart-section {{
+            text-align: center;
+        }}
+
+        .holding-chart-container {{
+            margin: 20px 0;
+            padding: 10px;
+            background: white;
+            border: 1px solid #e2e8f0;
+            border-radius: 4px;
+        }}
+
+        .holding-chart-image {{
+            max-width: 100%;
+            height: auto;
+            display: block;
+            margin: 0 auto;
         }}
 
         /* Print/PDF styles */
@@ -182,14 +223,20 @@ def get_html_template(company_name: str, timestamp: str = None) -> str:
             h2, h3 {{
                 page-break-after: avoid;
             }}
+
+            .cover-page {{
+                padding-top: 45%;
+                padding-bottom: 45%;
+                page-break-after: always;
+            }}
         }}
     </style>
 </head>
 <body>
     <div class="report-container">
-        <h1>דוח אנליזה - {company_name}</h1>
-        <div class="meta-info">
-{timestamp}
+        <div class="cover-page">
+            <h1>דוח אנליזה - {company_name}</h1>
+            <div class="meta-info">{timestamp}</div>
         </div>
 """
 
