@@ -44,6 +44,7 @@ from core import (
     map_report_structure,
     create_report_slices,
     # Report Builder
+    HEBREW_MONTHS,
     assemble_report,
     # PDF Converter
     html_to_pdf,
@@ -338,8 +339,15 @@ def process_company(company_dir: Path, model) -> tuple[bool, list[str]]:
         # Step 6: Assemble and save HTML
         final_html = assemble_report(company_name, html_sections)
 
-        html_output_file = output_company_dir / "final_report.html"
-        pdf_output_file = output_company_dir / "final_report.pdf"
+        # Generate filename with company name and date
+        display_name = company_name.replace('_', ' ')
+        month_idx = int(time.strftime('%m')) - 1
+        year = time.strftime('%Y')
+        timestamp = f"{HEBREW_MONTHS[month_idx]} {year}"
+        report_filename = f"{display_name} דוח אנליזה - {timestamp}"
+
+        html_output_file = output_company_dir / f"{report_filename}.html"
+        pdf_output_file = output_company_dir / f"{report_filename}.pdf"
 
         if save_html_report(final_html, html_output_file):
             logger.info(f"HTML report saved to: {html_output_file}")

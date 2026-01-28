@@ -53,6 +53,7 @@ from .pdf_processor import (
 )
 
 from .report_builder import (
+    HEBREW_MONTHS,
     get_html_template,
     get_html_footer,
     assemble_report,
@@ -102,6 +103,7 @@ __all__ = [
     'create_report_slices',
     'get_default_structure_map',
     # Report Builder
+    'HEBREW_MONTHS',
     'get_html_template',
     'get_html_footer',
     'assemble_report',

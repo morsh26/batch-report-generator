@@ -29,6 +29,12 @@ import fitz  # PyMuPDF - faster and better with Hebrew than PyPDF2
 # Load environment variables from .env file
 load_dotenv()
 
+# Hebrew month names for filename
+HEBREW_MONTHS = [
+    'ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני',
+    'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר'
+]
+
 # Optional: filter to specific company (pass as command line argument)
 COMPANY_FILTER = sys.argv[1] if len(sys.argv) > 1 else None
 
@@ -953,7 +959,15 @@ def process_company(company_dir: Path, model: genai.GenerativeModel) -> tuple[bo
 
         output_company_dir = OUTPUT_DIR / company_name
         output_company_dir.mkdir(parents=True, exist_ok=True)
-        output_file = output_company_dir / "final_report.html"
+
+        # Generate filename with company name and date
+        display_name = company_name.replace('_', ' ')
+        month_idx = int(time.strftime('%m')) - 1
+        year = time.strftime('%Y')
+        timestamp = f"{HEBREW_MONTHS[month_idx]} {year}"
+        report_filename = f"{display_name} דוח אנליזה - {timestamp}"
+
+        output_file = output_company_dir / f"{report_filename}.html"
 
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write(final_html)
